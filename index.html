@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Topic Trainer | Multiple Topics & Versions</title>
+  <style>
+    body{font-family:system-ui,sans-serif;background:#f4f6f8;color:#111;margin:0;padding:40px}
+    h1{font-size:28px;font-weight:700;color:#111827}
+    .toolbar{margin:10px 0 30px;display:flex;flex-wrap:wrap;gap:8px}
+    .btn,select.btn{background:#334155;color:#fff;border:none;border-radius:6px;padding:8px 16px;font-size:15px;cursor:pointer}
+    .btn:hover{background:#1e293b}
+    select.btn{appearance:none}
+    ol{padding-left:20px}
+    li{margin-bottom:18px}
+    select.answer{width:100%;padding:10px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;font-size:16px;transition:.2s}
+    .content{display:none;color:#334155;background:#f9fafb;border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px;margin-top:6px;line-height:1.55}
+    .content.show{display:block}
+    /* đúng/sai */
+    select.answer.correct{border-color:#22c55e !important; box-shadow:0 0 0 2px rgba(34,197,94,.12)}
+    select.answer.wrong{border-color:#ef4444 !important; box-shadow:0 0 0 2px rgba(239,68,68,.12)}
+    .content .k{font-weight:600; color:#065f46}
+  </style>
+</head>
+<body>
+  <h1 id="title">TOPIC</h1>
+
+  <div class="toolbar">
+    <select id="topicSelect" class="btn"></select>
+    <select id="versionSelect" class="btn"></select>
+    <button class="btn" id="toggleContent">Xem nội dung</button>
+    <button class="btn" id="checkBtn">Chấm điểm</button>
+    <button class="btn" id="backTopic">⬅️ Back Topic</button>
+    <button class="btn" id="nextTopic">➡️ Next Topic</button>
+  </div>
+
+  <ol id="list"></ol>
+
+<script type="module">
+  const DATA_DIR = 'data_23';
+  const MANIFEST_URL = `${DATA_DIR}/manifest.json`;
+
+  // ---- State ----
+  let groups = {};      // baseKey -> { display, versions:[{v, filename, title}] } (versions đã sort sẵn)
+  let topics = [];      // danh sách baseKey (đã sort)
+  let currentBase = '';
+  let version = 1;
+  let currentData = [];
+
+  // ---- DOM ----
+  const list = document.getElementById('list');
+  const title = document.getElementById('title');
+  const topicSelect = document.getElementById('topicSelect');
+  const versionSelect = document.getElementById('versionSelect');
+
+  // ---- Helpers ----
+  function parseGroupAndVersion(filename){
+    // Nhận dạng version dựa trên hậu tố _1, _2 ... hoặc không có thì là 1
+    const m = filename.match(/^(.*?)(?:_(\d+))?\.js$/);
+    const base = m ? m[1] : filename.replace(/\.js$/, '');
+    // Nếu KHÔNG có _1 nhưng base trùng với các file có _1, thì vẫn coi là version 1
+    const v = m && m[2] ? Number(m[2]) + 1 : 1;
+    // Giải thích: file .js = version 1, file _1.js = version 2, file _2.js = version 3, ...
+    return { base, v };
+  }
+
+  function displayFromTitle(titleStr){
+    return (titleStr || '').replace(/_\d+$/,'').trim() || 'Untitled';
+  }
+
+  function humanizeBase(baseKey){
+    const noTopic = baseKey.replace(/^topic/i,'Topic ');
+    const parts = noTopic.split('__');
+    if (parts.length === 2){
+      const left = parts[0].replace(/_/g,' ');
+      const right = parts[1].replace(/_/g,' ');
+      const cap = s => s.replace(/\b\w/g, c => c.toUpperCase());
+      return `${cap(right)} (${cap(left)})`.replace(/\s+/g,' ');
+    }
+    return baseKey.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase());
+  }
+
+  function rebuildVersionDropdown(){
+    const grp = groups[currentBase];
+    versionSelect.innerHTML = '';
+    if (!grp) return;
+    grp.versions.forEach(it => {
+      const opt = document.createElement('option');
+      opt.value = String(it.v);
+      opt.textContent = `Version ${it.v}`;
+      versionSelect.appendChild(opt);
+    });
+    // nếu version hiện tại không tồn tại trong nhóm thì quay về version nhỏ nhất
+    if (!grp.versions.find(x => x.v === version)) version = grp.versions[0]?.v || 1;
+    versionSelect.value = String(version);
+  }
+
+  function render(items){
+  list.innerHTML = '';
+  // tạo 1 danh sách chuẩn chứa tất cả câu đúng (giữ thứ tự)
+  items.forEach((text) => {
+    const li = document.createElement('li');
+    li.dataset.correct = text; // lưu đáp án đúng
+
+    // --- Xáo trộn ngẫu nhiên các lựa chọn ---
+    const shuffled = [...items].sort(() => Math.random() - 0.5);
+
+    // --- Tạo thẻ select ---
+    const sel = document.createElement('select');
+    sel.className = 'answer';
+    sel.innerHTML =
+      `<option value="">— chọn đáp án —</option>` +
+      shuffled.map(it => `<option value="${it}">${it}</option>`).join('');
+
+    // --- Hiển thị đáp án đúng khi sai ---
+    const content = document.createElement('div');
+    content.className = 'content';
+    content.innerHTML = `Đáp án đúng: <span class="k"></span>`;
+
+    li.appendChild(sel);
+    li.appendChild(content);
+    list.appendChild(li);
+  });
+}
+
+  async function loadManifest(){
+  const res = await fetch(MANIFEST_URL, { cache: 'no-store' });
+  if (!res.ok) throw new Error('Không tìm thấy manifest.json');
+  const manifest = await res.json(); // mảng { filename, title, ... }
+
+  const tmp = {};
+  for (const t of manifest){
+    const { filename, title } = t;
+    const { base, v } = parseGroupAndVersion(filename);
+    if (!tmp[base]) tmp[base] = [];
+    tmp[base].push({ v, filename, title });
+  }
+
+  groups = {};
+  topics = Object.keys(tmp).sort();
+  for (const base of topics){
+    // sắp xếp version đúng thứ tự (1,2,3,...)
+    const versions = tmp[base].sort((a,b)=>a.v-b.v);
+    groups[base] = {
+      display: displayFromTitle(versions[0]?.title || ''),
+      versions
+    };
+  }
+
+  // build dropdown
+  topicSelect.innerHTML = topics.map(k => {
+    const label = groups[k].display || humanizeBase(k);
+    return `<option value="${k}">${label}</option>`;
+  }).join('');
+
+  currentBase = topics[0] || '';
+}
+
+  async function loadData(){
+    try{
+      if (!currentBase){ list.innerHTML = '<p style="color:red">Chưa có topic.</p>'; return; }
+      const grp = groups[currentBase];
+      if (!grp){ list.innerHTML = '<p style="color:red">Không tìm thấy nhóm topic.</p>'; return; }
+
+      // tìm đúng version; nếu không có thì lấy version nhỏ nhất
+      const found = grp.versions.find(x => x.v === version) || grp.versions[0];
+      const file = found.filename;
+
+      // import động file JS export const data = [...]
+      const mod = await import(`./${DATA_DIR}/${file}?t=${Date.now()}`);
+      const raw = (mod && Array.isArray(mod.data)) ? mod.data : [];
+      if (!raw.length) throw new Error('Dữ liệu rỗng hoặc sai định dạng');
+
+      // KHÔNG xáo trộn nữa
+      currentData = [...raw];
+      render(currentData);
+
+      // tiêu đề
+      const label = groups[currentBase].display || humanizeBase(currentBase);
+      title.textContent = `TOPIC: ${label} (Version ${found.v}/${grp.versions.length})`;
+      version = found.v;
+      rebuildVersionDropdown();
+    }catch(e){
+      console.error(e);
+      list.innerHTML = '<p style="color:red">❌ Lỗi khi tải dữ liệu. Kiểm tra manifest & file JS.</p>';
+    }
+  }
+
+  // ---- Điều hướng topic ổn định, tránh lặp ----
+  function nextTopic(){
+    const idx = topics.indexOf(currentBase);
+    const newIdx = (idx + 1) % topics.length;
+    currentBase = topics[newIdx];
+    topicSelect.value = currentBase;
+    version = groups[currentBase].versions[0]?.v || 1; // luôn về version nhỏ nhất của topic mới
+    rebuildVersionDropdown();
+    loadData();
+  }
+
+  function backTopic(){
+    const idx = topics.indexOf(currentBase);
+    const newIdx = (idx - 1 + topics.length) % topics.length;
+    currentBase = topics[newIdx];
+    topicSelect.value = currentBase;
+    version = groups[currentBase].versions[0]?.v || 1;
+    rebuildVersionDropdown();
+    loadData();
+  }
+
+  // --------------------- EVENTS ---------------------
+  document.getElementById('toggleContent').onclick = () => {
+    document.querySelectorAll('.content').forEach(e => e.classList.toggle('show'));
+  };
+
+  document.getElementById('checkBtn').onclick = () => {
+  const selects = list.querySelectorAll('select.answer');
+  let correctCount = 0;
+
+  selects.forEach((sel) => {
+    const li = sel.closest('li');
+    const answer = li.dataset.correct;
+    const content = li.querySelector('.content');
+    const keySpan = li.querySelector('.content .k');
+    keySpan.textContent = answer || '';
+
+    if (sel.value === answer) {
+      sel.classList.remove('wrong');
+      sel.classList.add('correct');
+      content.classList.remove('show');
+      correctCount++;
+    } else {
+      sel.classList.remove('correct');
+      sel.classList.add('wrong');
+      content.classList.add('show');
+    }
+  });
+
+  if (correctCount === selects.length){
+    // === TIẾN TRÌNH: v1 -> v2 -> v3 -> NEXT TOPIC (về v1) ===
+    const grp = groups[currentBase];
+    const versions = grp.versions;                  // đã sort tăng dần
+    const idxV = versions.findIndex(x => x.v === version);
+
+    if (idxV >= 0 && idxV < versions.length - 1) {
+      // Còn version tiếp theo trong cùng topic -> tăng phiên bản
+      version = versions[idxV + 1].v;
+      loadData();                                   // load đúng "Version X/total"
+    } else {
+      // Đã hoàn tất toàn bộ version của topic hiện tại -> chuyển topic mới (về version 1)
+      const idxT = topics.indexOf(currentBase);
+      const newIdxT = (idxT + 1) % topics.length;
+      currentBase = topics[newIdxT];
+      topicSelect.value = currentBase;
+      version = groups[currentBase].versions[0]?.v || 1;
+      rebuildVersionDropdown();
+      loadData();
+    }
+  } else {
+    alert(`Bạn đúng ${correctCount}/${selects.length}. Đáp án đúng đã hiện ở mỗi câu sai.`);
+  }
+};
+
+
+  topicSelect.onchange = e => {
+    currentBase = e.target.value;
+    version = groups[currentBase].versions[0]?.v || 1;
+    rebuildVersionDropdown();
+    loadData();
+  };
+
+  versionSelect.onchange = e => {
+    version = Number(e.target.value)||1;
+    loadData();
+  };
+
+  document.getElementById('nextTopic').onclick = nextTopic;
+  document.getElementById('backTopic').onclick = backTopic;
+
+  // ---- init ----
+  (async () => {
+    await loadManifest();
+    rebuildVersionDropdown();
+    await loadData();
+  })();
+</script>
+</body>
+</html>
